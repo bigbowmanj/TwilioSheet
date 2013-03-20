@@ -1,7 +1,7 @@
 require 'sinatra'
-require 'oauth'
-require 'oauth/consumer'
+require 'omniauth-google-oauth2'
 require 'dotenv'
+require 'google_drive'
 
 Dotenv.load
 configure do
@@ -9,35 +9,57 @@ configure do
   set :session_secret, ENV['SESSION_SECRET']
 end
 
+# FIXME: limit the scope to just what we need (probably userinfo.profile and spreadsheets)
+use OmniAuth::Builder do
+  provider :google_oauth2, ENV["GOOGLE_CLIENT_ID"], ENV["GOOGLE_CLIENT_SECRET"],
+    scope: ["userinfo.email",
+            "userinfo.profile",
+            "https://docs.google.com/feeds/",
+            "http://docs.googleusercontent.com/",
+            "https://spreadsheets.google.com/feeds/"].join(',')
+end
+
 before do
-  @consumer ||= OAuth::Consumer.new(
-    ENV['GOOGLE_CLIENT_ID'],
-    ENV['GOOGLE_CLIENT_SECRET'],
-    site: 'https://accounts.google.com/o/oauth2/auth'
-  )
-  @google_request_token = session[:google_request_token]
-  @google_access_token = session[:google_access_token]
+  @google_auth = session[:google_auth]
 end
 
 get '/' do
-  if @google_access_token
-    "You're logged in!"
+  if @google_auth
+    session[:google] = GoogleDrive.login_with_oauth @google_auth.credentials.token
   else
-    redirect '/login/google'
+    redirect '/auth/google_oauth2'
   end
 end
 
-get '/login/google' do
-  # require 'debugger'; debugger
-  @google_request_token = @consumer.get_request_token
-  session[:google_request_token] = @request_token.token
-  session[:google_request_token_secret] = @request_token.secret
-  redirect @google_request_token.authorize_url
+get '/create' do
+  google = session[:google]
+  spreadsheet = google.create_spreadsheet("TwilioSheet")
+  spreadsheet_key = spreadsheet.key()
+  auth_token = @google_auth.credentials.token
+  url = "#{request.env['rack.url_scheme']}://#{request.env['HTTP_HOST']}/#{auth_token}/#{spreadsheet_key}"
+  "Use this URL: #{url}"
 end
 
-get '/oauth2callback' do
-  @google_access_token = @google_request_token.get_access_token oauth_verifier: params[:oauth_verifier]
-  session[:google_access_token] = @google_access_token.token
-  session[:google_access_token_secret] = @google_access_token.secret
+get '/inspect' do
+  content_type 'text/plain'
+  @google_auth.inspect
+end
+
+get '/logout' do
+  session[:google_auth] = nil
+end
+
+post '/sms/:auth_token/:spreadsheet_key' do
+  google = GoogleDrive.login_with_oauth params[:auth_token]
+  worksheet = google.spreadsheet_by_key(params[:spreadsheet_key]).worksheets[0]
+
+  params.delete :spreadsheet_key
+  params.delete :auth_token
+  worksheet.list.push({'To' => params[:To], 'From' => params[:From], 'Body' => params[:Body]})
+  worksheet.save
+end
+
+get '/auth/google_oauth2/callback' do
+  session[:google_auth] = request.env['omniauth.auth']
   redirect '/'
 end
